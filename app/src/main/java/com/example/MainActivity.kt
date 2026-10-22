@@ -38,7 +38,12 @@ import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StatisticsScreen
 import android.content.Intent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import com.example.ui.screens.AppSplashScreen
 import com.example.ui.theme.AdvancedFocusTheme
 
 class MainActivity : ComponentActivity() {
@@ -55,7 +60,32 @@ class MainActivity : ComponentActivity() {
 
     setContent {
       AdvancedFocusTheme {
-        MainAppContent(targetRoute = targetRouteState.value)
+        val currentTargetRoute = targetRouteState.value
+        var isSplashCompleted by rememberSaveable {
+          mutableStateOf(!currentTargetRoute.isNullOrBlank())
+        }
+
+        LaunchedEffect(currentTargetRoute) {
+          if (!currentTargetRoute.isNullOrBlank()) {
+            isSplashCompleted = true
+          }
+        }
+
+        Crossfade(
+          targetState = isSplashCompleted,
+          animationSpec = tween(durationMillis = 450),
+          label = "splash_to_main_transition"
+        ) { splashDone ->
+          if (!splashDone) {
+            AppSplashScreen(
+              onSplashFinished = {
+                isSplashCompleted = true
+              }
+            )
+          } else {
+            MainAppContent(targetRoute = currentTargetRoute)
+          }
+        }
       }
     }
   }

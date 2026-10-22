@@ -2,8 +2,15 @@ package com.example.shield
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.RadialGradient
+import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.SweepGradient
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -19,16 +26,20 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.Space
 import android.widget.TextView
 import com.example.MainActivity
 import com.example.navigation.Screen
+import com.example.quotes.FocusQuotesRepository
 import com.example.timer.NotificationHelper
 import java.util.Locale
 
 /**
- * Manages the system-level WindowManager floating overlay view
- * (TYPE_APPLICATION_OVERLAY) with Midnight Black, Neon Purple, and Electric Cyan accents,
+ * Manages the system-level WindowManager full-screen overlay view
+ * (TYPE_APPLICATION_OVERLAY) with an edge-to-edge Cyber-Shield layout,
+ * custom Canvas neon progress radar ring, real blocked app icon,
  * 60-second countdown, and automatic redirect to the Focus App.
  */
 class FocusBlockOverlayManager(private val context: Context) {
@@ -36,6 +47,13 @@ class FocusBlockOverlayManager(private val context: Context) {
   companion object {
     private const val TAG = "FocusBlockOverlay"
     private const val COUNTDOWN_TOTAL_SECONDS = 60
+
+    @Volatile
+    private var activeInstance: FocusBlockOverlayManager? = null
+
+    fun dismissActiveOverlay() {
+      activeInstance?.hideBlockOverlay()
+    }
   }
 
   private val windowManager: WindowManager =
@@ -51,6 +69,8 @@ class FocusBlockOverlayManager(private val context: Context) {
   private var appNameTextView: TextView? = null
   private var countdownTextView: TextView? = null
   private var strictBadgeView: TextView? = null
+  private var appIconView: ImageView? = null
+  private var radarRingView: NeonProgressRingView? = null
 
   private var countdownRunnable: Runnable? = null
   private var countdownEndEpoch = 0L
@@ -76,7 +96,7 @@ class FocusBlockOverlayManager(private val context: Context) {
       try {
         if (isOverlayAttached && overlayView != null) {
           currentlyBlockedPackage = packageName
-          updateOverlayText(appName, isStrictMode)
+          updateOverlayContent(appName, packageName, isStrictMode)
           return@post
         }
 
@@ -84,12 +104,13 @@ class FocusBlockOverlayManager(private val context: Context) {
         hasRedirected = false
         countdownEndEpoch = SystemClock.elapsedRealtime() + (COUNTDOWN_TOTAL_SECONDS * 1000L)
 
-        val view = createOverlayView(appName, packageName, isStrictMode)
+        val view = createFullScreenOverlayView(appName, packageName, isStrictMode)
         val params = createLayoutParams()
 
         windowManager.addView(view, params)
         overlayView = view
         isOverlayAttached = true
+        activeInstance = this
 
         startCountdown(appName)
         Log.i(TAG, "Full-screen WindowManager overlay displayed for $appName ($packageName)")
@@ -113,6 +134,11 @@ class FocusBlockOverlayManager(private val context: Context) {
           appNameTextView = null
           countdownTextView = null
           strictBadgeView = null
+          appIconView = null
+          radarRingView = null
+          if (activeInstance === this) {
+            activeInstance = null
+          }
           Log.i(TAG, "WindowManager overlay dismissed")
         }
       } catch (e: Exception) {
@@ -120,6 +146,9 @@ class FocusBlockOverlayManager(private val context: Context) {
         overlayView = null
         isOverlayAttached = false
         currentlyBlockedPackage = null
+        if (activeInstance === this) {
+          activeInstance = null
+        }
       }
     }
   }
@@ -129,11 +158,16 @@ class FocusBlockOverlayManager(private val context: Context) {
 
     countdownRunnable = object : Runnable {
       override fun run() {
-        val remaining = ((countdownEndEpoch - SystemClock.elapsedRealtime() + 999) / 1000).toInt().coerceIn(0, COUNTDOWN_TOTAL_SECONDS)
+        val now = SystemClock.elapsedRealtime()
+        val remainingMillis = (countdownEndEpoch - now).coerceAtLeast(0L)
+        val remaining = ((remainingMillis + 999) / 1000).toInt().coerceIn(0, COUNTDOWN_TOTAL_SECONDS)
         val minutes = remaining / 60
         val seconds = remaining % 60
         val formatted = String.format(Locale.US, "%02d:%02d", minutes, seconds)
         countdownTextView?.text = formatted
+
+        val fraction = (remainingMillis.toFloat() / (COUNTDOWN_TOTAL_SECONDS * 1000f)).coerceIn(0f, 1f)
+        radarRingView?.setProgress(fraction)
 
         if (remaining <= 0) {
           if (!hasRedirected) {
@@ -141,7 +175,7 @@ class FocusBlockOverlayManager(private val context: Context) {
             redirectToFocus(appName)
           }
         } else {
-          mainHandler.postDelayed(this, 1000L)
+          mainHandler.postDelayed(this, 100L)
         }
       }
     }
@@ -167,12 +201,21 @@ class FocusBlockOverlayManager(private val context: Context) {
     hideBlockOverlay()
   }
 
-  private fun updateOverlayText(appName: String, isStrictMode: Boolean) {
-    appNameTextView?.text = "$appName is Paused"
-    strictBadgeView?.visibility = if (isStrictMode) View.VISIBLE else View.GONE
+  private fun updateOverlayContent(appName: String, packageName: String, isStrictMode: Boolean) {
+    appNameTextView?.text = "🔒  $appName is Locked"
+    strictBadgeView?.text = if (isStrictMode) {
+      "⚡ STRICT FOCUS SHIELD ACTIVE"
+    } else {
+      "🛡️ FOCUS MODE ACTIVE • APP SHIELDED"
+    }
+    try {
+      val icon = context.packageManager.getApplicationIcon(packageName)
+      appIconView?.setImageDrawable(icon)
+    } catch (_: Exception) {
+    }
   }
 
-  private fun createOverlayView(
+  private fun createFullScreenOverlayView(
     appName: String,
     packageName: String,
     isStrictMode: Boolean
@@ -180,173 +223,310 @@ class FocusBlockOverlayManager(private val context: Context) {
     val density = context.resources.displayMetrics.density
     fun dp(value: Int): Int = (value * density).toInt()
 
-    // 1. Root full-screen container: Midnight Black canvas
+    // 1. True Full-Screen Edge-to-Edge Container
     val rootLayout = FrameLayout(context).apply {
-      setBackgroundColor(Color.parseColor("#F907080D")) // Deep Midnight Black
+      val bgGradient = GradientDrawable(
+        GradientDrawable.Orientation.TOP_BOTTOM,
+        intArrayOf(
+          Color.parseColor("#05060B"),
+          Color.parseColor("#0B0E1C"),
+          Color.parseColor("#06070E")
+        )
+      )
+      background = bgGradient
       isClickable = true
       isFocusable = true
       isFocusableInTouchMode = true
     }
 
-    // 2. Centered Card Container
-    val cardLayout = LinearLayout(context).apply {
+    // 2. Full-Screen Vertical Layout (Space-Between from Top to Bottom)
+    val contentColumn = LinearLayout(context).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER_HORIZONTAL
-      setPadding(dp(22), dp(26), dp(22), dp(26))
-
-      val cardBg = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(24).toFloat()
-        setColor(Color.parseColor("#12141F"))
-        setStroke(dp(2), if (isStrictMode) Color.parseColor("#9D4EDD") else Color.parseColor("#00E5FF"))
-      }
-      background = cardBg
+      setPadding(dp(24), dp(48), dp(24), dp(36))
     }
 
-    val cardParams = FrameLayout.LayoutParams(
+    val contentParams = FrameLayout.LayoutParams(
       FrameLayout.LayoutParams.MATCH_PARENT,
-      FrameLayout.LayoutParams.WRAP_CONTENT
-    ).apply {
-      gravity = Gravity.CENTER
-      marginStart = dp(20)
-      marginEnd = dp(20)
-    }
+      FrameLayout.LayoutParams.MATCH_PARENT
+    )
 
-    // 3. Status Pill
+    // 3. Top Status Header Pill
     val pillView = TextView(context).apply {
-      text = if (isStrictMode) "STRICT FOCUS MODE ACTIVE" else "FOCUS MODE ACTIVE • DISTRACTION LOCKED"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-      setTextColor(if (isStrictMode) Color.parseColor("#9D4EDD") else Color.parseColor("#00E5FF"))
+      text = if (isStrictMode) {
+        "⚡ STRICT FOCUS SHIELD ACTIVE"
+      } else {
+        "🛡️ FOCUS MODE ACTIVE • APP SHIELDED"
+      }
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+      setTextColor(if (isStrictMode) Color.parseColor("#C77DFF") else Color.parseColor("#00E5FF"))
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
-      setPadding(dp(12), dp(4), dp(12), dp(4))
+      letterSpacing = 0.08f
+      setPadding(dp(16), dp(8), dp(16), dp(8))
 
       val pillBg = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(16).toFloat()
-        setColor(Color.parseColor("#1A1C29"))
+        cornerRadius = dp(24).toFloat()
+        setColor(Color.parseColor("#141728"))
         setStroke(dp(1), if (isStrictMode) Color.parseColor("#9D4EDD") else Color.parseColor("#00E5FF"))
       }
       background = pillBg
     }
-    cardLayout.addView(pillView, LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.WRAP_CONTENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply {
-      gravity = Gravity.CENTER_HORIZONTAL
-      bottomMargin = dp(14)
-    })
-
-    // 4. Glowing Lock Emblem
-    val badgeContainer = FrameLayout(context).apply {
-      val badgeBg = GradientDrawable().apply {
-        shape = GradientDrawable.OVAL
-        setColor(Color.parseColor("#261438"))
-        setStroke(dp(2), Color.parseColor("#9D4EDD"))
+    strictBadgeView = pillView
+    contentColumn.addView(
+      pillView,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        gravity = Gravity.CENTER_HORIZONTAL
+        bottomMargin = dp(18)
       }
-      background = badgeBg
-    }
-    val badgeParams = LinearLayout.LayoutParams(dp(68), dp(68)).apply {
-      gravity = Gravity.CENTER_HORIZONTAL
-      bottomMargin = dp(12)
-    }
+    )
 
-    val iconText = TextView(context).apply {
-      text = "🔒"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
+    // 4. Center Radar Ring + Real App Icon + 60s Digital Timer
+    val ringSizePx = dp(236)
+    val radarContainer = FrameLayout(context)
+    val ringView = NeonProgressRingView(context, isStrictMode)
+    radarRingView = ringView
+    radarContainer.addView(
+      ringView,
+      FrameLayout.LayoutParams(ringSizePx, ringSizePx, Gravity.CENTER)
+    )
+
+    val ringInnerColumn = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER
     }
-    badgeContainer.addView(
-      iconText,
-      FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-    )
-    cardLayout.addView(badgeContainer, badgeParams)
 
-    // 5. Large 60-Second Countdown (MM:SS)
+    // App Icon Badge inside the ring
+    val iconWrapper = FrameLayout(context).apply {
+      val circleBg = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(Color.parseColor("#181C30"))
+        setStroke(dp(2), Color.parseColor("#9D4EDD"))
+      }
+      background = circleBg
+      setPadding(dp(10), dp(10), dp(10), dp(10))
+    }
+
+    val iconImage = ImageView(context).apply {
+      scaleType = ImageView.ScaleType.FIT_CENTER
+      try {
+        val appDrawable = context.packageManager.getApplicationIcon(packageName)
+        setImageDrawable(appDrawable)
+      } catch (_: Exception) {
+        setImageResource(android.R.drawable.ic_lock_idle_lock)
+      }
+    }
+    appIconView = iconImage
+    iconWrapper.addView(
+      iconImage,
+      FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER)
+    )
+    ringInnerColumn.addView(
+      iconWrapper,
+      LinearLayout.LayoutParams(dp(64), dp(64)).apply {
+        gravity = Gravity.CENTER_HORIZONTAL
+        bottomMargin = dp(8)
+      }
+    )
+
+    // Large 60-Second Countdown (MM:SS)
     val timerView = TextView(context).apply {
       text = "01:00"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 36f)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 40f)
       setTextColor(Color.parseColor("#00E5FF"))
       typeface = Typeface.MONOSPACE
+      paint.isFakeBoldText = true
       gravity = Gravity.CENTER
     }
     countdownTextView = timerView
-    cardLayout.addView(timerView, LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    ))
+    ringInnerColumn.addView(
+      timerView,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      )
+    )
 
     val autoReturnSub = TextView(context).apply {
-      text = "Auto-return timer (60s)"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-      setTextColor(Color.parseColor("#A0A7BD"))
+      text = "AUTO-REDIRECT TIMER"
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+      setTextColor(Color.parseColor("#94A3B8"))
+      typeface = Typeface.DEFAULT_BOLD
+      letterSpacing = 0.1f
       gravity = Gravity.CENTER
     }
-    cardLayout.addView(autoReturnSub, LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply {
-      bottomMargin = dp(12)
-    })
+    ringInnerColumn.addView(
+      autoReturnSub,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      )
+    )
 
-    // 6. Header: "YOUR FOCUS MATTERS"
+    radarContainer.addView(
+      ringInnerColumn,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        Gravity.CENTER
+      )
+    )
+
+    contentColumn.addView(
+      radarContainer,
+      LinearLayout.LayoutParams(ringSizePx, ringSizePx).apply {
+        gravity = Gravity.CENTER_HORIZONTAL
+        bottomMargin = dp(18)
+      }
+    )
+
+    // 5. Bold Headline & Subtitle
     val titleView = TextView(context).apply {
       text = "YOUR FOCUS MATTERS"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
       setTextColor(Color.WHITE)
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
       letterSpacing = 0.08f
     }
     titleTextView = titleView
-    cardLayout.addView(titleView, LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    ))
+    contentColumn.addView(
+      titleView,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      )
+    )
 
-    // 7. Subtitle: "This app is paused while you focus."
     val subView = TextView(context).apply {
       text = "This app is paused while you focus."
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
       setTextColor(Color.parseColor("#00E5FF"))
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
     }
     subtitleTextView = subView
-    cardLayout.addView(subView, LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply {
-      topMargin = dp(4)
-      bottomMargin = dp(6)
-    })
+    contentColumn.addView(
+      subView,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        topMargin = dp(4)
+        bottomMargin = dp(10)
+      }
+    )
 
-    // 8. Blocked App Name Label
-    val appLabelView = TextView(context).apply {
-      text = "$appName is locked"
+    // Blocked App Badge
+    val appBadge = TextView(context).apply {
+      text = "🔒  $appName is Locked"
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-      setTextColor(Color.parseColor("#B388FF"))
+      setTextColor(Color.WHITE)
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      setPadding(dp(16), dp(7), dp(16), dp(7))
+
+      val badgeBg = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dp(14).toFloat()
+        setColor(Color.parseColor("#191D30"))
+        setStroke(dp(1), Color.parseColor("#9D4EDD"))
+      }
+      background = badgeBg
+    }
+    appNameTextView = appBadge
+    contentColumn.addView(
+      appBadge,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        gravity = Gravity.CENTER_HORIZONTAL
+        bottomMargin = dp(16)
+      }
+    )
+
+    // 6. Motivational Quote Glass Card
+    val quote = FocusQuotesRepository.getRandomQuote()
+    val quoteCard = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dp(18), dp(14), dp(18), dp(14))
+      val qBg = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dp(18).toFloat()
+        setColor(Color.parseColor("#121524"))
+        setStroke(dp(1), Color.parseColor("#262B44"))
+      }
+      background = qBg
+    }
+
+    val quoteText = TextView(context).apply {
+      text = "“${quote.text}”"
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+      setTextColor(Color.parseColor("#E2E8F0"))
+      setTypeface(typeface, Typeface.ITALIC)
       gravity = Gravity.CENTER
     }
-    appNameTextView = appLabelView
-    cardLayout.addView(appLabelView, LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply {
-      bottomMargin = dp(18)
-    })
+    quoteCard.addView(quoteText)
 
-    // 9. Primary Action: Return to Focus App Now
+    val quoteAuthor = TextView(context).apply {
+      text = "— ${quote.author}"
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+      setTextColor(Color.parseColor("#C77DFF"))
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.END
+    }
+    quoteCard.addView(
+      quoteAuthor,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        topMargin = dp(6)
+      }
+    )
+
+    contentColumn.addView(
+      quoteCard,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        bottomMargin = dp(16)
+      }
+    )
+
+    // Flexible Spacer to push action buttons cleanly toward bottom of full screen
+    contentColumn.addView(
+      Space(context),
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        0,
+        1f
+      )
+    )
+
+    // 7. Full-Screen Bottom Action Buttons
     val returnBtn = Button(context).apply {
-      text = "Return to Focus App Now"
+      text = "←  RETURN TO FOCUS APP NOW"
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
       setTextColor(Color.WHITE)
       typeface = Typeface.DEFAULT_BOLD
+      letterSpacing = 0.04f
 
-      val btnBg = GradientDrawable().apply {
+      val btnBg = GradientDrawable(
+        GradientDrawable.Orientation.LEFT_RIGHT,
+        intArrayOf(
+          Color.parseColor("#7C3AED"),
+          Color.parseColor("#9D4EDD")
+        )
+      ).apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(14).toFloat()
-        setColor(Color.parseColor("#8B5CF6"))
+        cornerRadius = dp(16).toFloat()
       }
       background = btnBg
 
@@ -354,22 +534,25 @@ class FocusBlockOverlayManager(private val context: Context) {
         redirectToFocus(appName)
       }
     }
-    cardLayout.addView(returnBtn, LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      dp(48)
-    ))
+    contentColumn.addView(
+      returnBtn,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        dp(54)
+      )
+    )
 
-    // 10. Secondary Action: Go to Home Screen
     val homeBtn = Button(context).apply {
-      text = "Go to Phone Home Screen"
+      text = "⌂  GO TO PHONE HOME SCREEN"
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-      setTextColor(Color.parseColor("#E0E2EC"))
+      setTextColor(Color.parseColor("#E2E8F0"))
+      typeface = Typeface.DEFAULT_BOLD
 
       val outlineBg = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(14).toFloat()
-        setColor(Color.parseColor("#1B1D27"))
-        setStroke(dp(1), Color.parseColor("#2F3346"))
+        cornerRadius = dp(16).toFloat()
+        setColor(Color.parseColor("#141829"))
+        setStroke(dp(1), Color.parseColor("#2E3654"))
       }
       background = outlineBg
 
@@ -378,14 +561,17 @@ class FocusBlockOverlayManager(private val context: Context) {
         hideBlockOverlay()
       }
     }
-    cardLayout.addView(homeBtn, LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      dp(46)
-    ).apply {
-      topMargin = dp(8)
-    })
+    contentColumn.addView(
+      homeBtn,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        dp(50)
+      ).apply {
+        topMargin = dp(10)
+      }
+    )
 
-    // Back key handling
+    // Hardware Back key handling
     rootLayout.setOnKeyListener { _, keyCode, event ->
       if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
         goToHomeScreen()
@@ -396,7 +582,7 @@ class FocusBlockOverlayManager(private val context: Context) {
       }
     }
 
-    rootLayout.addView(cardLayout, cardParams)
+    rootLayout.addView(contentColumn, contentParams)
     return rootLayout
   }
 
@@ -416,7 +602,7 @@ class FocusBlockOverlayManager(private val context: Context) {
         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
       PixelFormat.TRANSLUCENT
     ).apply {
-      gravity = Gravity.CENTER
+      gravity = Gravity.FILL
     }
   }
 
@@ -429,6 +615,97 @@ class FocusBlockOverlayManager(private val context: Context) {
       context.startActivity(homeIntent)
     } catch (e: Exception) {
       Log.e(TAG, "Failed to launch Home intent", e)
+    }
+  }
+
+  /**
+   * Custom View that renders a glowing Neon Purple & Electric Cyan
+   * circular countdown progress ring with cyber radar accents.
+   */
+  private class NeonProgressRingView(
+    context: Context,
+    private val isStrict: Boolean
+  ) : View(context) {
+
+    private var progressFraction = 1f
+    private val density = context.resources.displayMetrics.density
+    private val strokePx = 9f * density
+    private val outerDashStrokePx = 2f * density
+    private val arcRect = RectF()
+    private val outerRect = RectF()
+
+    private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      style = Paint.Style.STROKE
+      strokeWidth = strokePx
+      color = Color.parseColor("#242942")
+    }
+
+    private val outerRadarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      style = Paint.Style.STROKE
+      strokeWidth = outerDashStrokePx
+      color = if (isStrict) Color.parseColor("#559D4EDD") else Color.parseColor("#5500E5FF")
+      pathEffect = DashPathEffect(floatArrayOf(12f * density, 10f * density), 0f)
+    }
+
+    private val progressPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      style = Paint.Style.STROKE
+      strokeWidth = strokePx
+      strokeCap = Paint.Cap.ROUND
+    }
+
+    private val auraPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      style = Paint.Style.FILL
+    }
+
+    fun setProgress(fraction: Float) {
+      progressFraction = fraction.coerceIn(0f, 1f)
+      invalidate()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+      super.onSizeChanged(w, h, oldw, oldh)
+      val pad = strokePx * 1.8f
+      arcRect.set(pad, pad, w - pad, h - pad)
+      val outerPad = outerDashStrokePx * 2f
+      outerRect.set(outerPad, outerPad, w - outerPad, h - outerPad)
+
+      val cx = w / 2f
+      val cy = h / 2f
+      progressPaint.shader = SweepGradient(
+        cx,
+        cy,
+        intArrayOf(
+          Color.parseColor("#00E5FF"),
+          Color.parseColor("#9D4EDD"),
+          Color.parseColor("#00E5FF")
+        ),
+        floatArrayOf(0f, 0.5f, 1f)
+      )
+
+      if (w > 0 && h > 0) {
+        auraPaint.shader = RadialGradient(
+          cx,
+          cy,
+          w / 2f,
+          intArrayOf(
+            Color.parseColor("#289D4EDD"),
+            Color.parseColor("#1000E5FF"),
+            Color.TRANSPARENT
+          ),
+          floatArrayOf(0f, 0.65f, 1f),
+          Shader.TileMode.CLAMP
+        )
+      }
+    }
+
+    override fun onDraw(canvas: Canvas) {
+      super.onDraw(canvas)
+      val cx = width / 2f
+      val cy = height / 2f
+      canvas.drawCircle(cx, cy, width / 2f, auraPaint)
+      canvas.drawOval(outerRect, outerRadarPaint)
+      canvas.drawOval(arcRect, trackPaint)
+      canvas.drawArc(arcRect, -90f, 360f * progressFraction, false, progressPaint)
     }
   }
 }
