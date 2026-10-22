@@ -1,0 +1,6 @@
+{
+  "name": "Advanced Focus",
+  "description": "Premium productivity and focus application designed for distraction-free deep work.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
