@@ -20,6 +20,10 @@ class NotificationHelper(private val context: Context) {
     const val SERVICE_CHANNEL_ID = "advanced_focus_shield_service"
     const val NOTIFICATION_ID = 1001
     const val SERVICE_NOTIFICATION_ID = 1005
+    const val WELCOME_NOTIFICATION_ID = 1008
+    private const val ONBOARDING_PREFS = "focus_shield_onboarding_prefs"
+    private const val KEY_FOUNDER_WELCOME_NOTIFIED = "founder_welcome_notified_v1"
+    private const val KEY_FOUNDER_WELCOME_DIALOG_SHOWN = "founder_welcome_dialog_shown_v1"
   }
 
   init {
@@ -30,10 +34,10 @@ class NotificationHelper(private val context: Context) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       val timerChannel = NotificationChannel(
         CHANNEL_ID,
-        "Timer Completion Alerts",
+        "Focus Shield & Alerts",
         NotificationManager.IMPORTANCE_HIGH
       ).apply {
-        description = "Alerts when a focus session or break timer has completed"
+        description = "Welcome messages, timer completion alerts, and focus shield notifications"
         enableVibration(true)
       }
 
@@ -49,6 +53,94 @@ class NotificationHelper(private val context: Context) {
       val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
       manager?.createNotificationChannel(timerChannel)
       manager?.createNotificationChannel(serviceChannel)
+    }
+  }
+
+  fun shouldShowFounderWelcomeDialog(): Boolean {
+    val prefs = context.getSharedPreferences(ONBOARDING_PREFS, Context.MODE_PRIVATE)
+    return !prefs.getBoolean(KEY_FOUNDER_WELCOME_DIALOG_SHOWN, false)
+  }
+
+  fun markFounderWelcomeDialogShown() {
+    val prefs = context.getSharedPreferences(ONBOARDING_PREFS, Context.MODE_PRIVATE)
+    prefs.edit().putBoolean(KEY_FOUNDER_WELCOME_DIALOG_SHOWN, true).apply()
+  }
+
+  /**
+   * Sends a one-time welcome notification to the user's phone on first app open
+   * on behalf of App Founder Amit Meena.
+   */
+  fun sendFounderWelcomeNotificationIfFirstLaunch(): Boolean {
+    val prefs = context.getSharedPreferences(ONBOARDING_PREFS, Context.MODE_PRIVATE)
+    if (prefs.getBoolean(KEY_FOUNDER_WELCOME_NOTIFIED, false)) {
+      return false
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      val permission = ContextCompat.checkSelfPermission(
+        context,
+        android.Manifest.permission.POST_NOTIFICATIONS
+      )
+      if (permission != PackageManager.PERMISSION_GRANTED) {
+        return false
+      }
+    }
+
+    val delivered = sendFounderWelcomeNotificationNow()
+    if (delivered) {
+      prefs.edit().putBoolean(KEY_FOUNDER_WELCOME_NOTIFIED, true).apply()
+    }
+    return delivered
+  }
+
+  fun sendFounderWelcomeNotificationNow(): Boolean {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      val permission = ContextCompat.checkSelfPermission(
+        context,
+        android.Manifest.permission.POST_NOTIFICATIONS
+      )
+      if (permission != PackageManager.PERMISSION_GRANTED) {
+        return false
+      }
+    }
+
+    val intent = Intent(context, MainActivity::class.java).apply {
+      flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+    }
+
+    val pendingIntent = PendingIntent.getActivity(
+      context,
+      8,
+      intent,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    val welcomeTitle = "Welcome to Focus Shield! 🛡️"
+    val welcomeShort = "Warm welcome from App Founder Amit Meena — Master your time & attention."
+    val welcomeBigText =
+      "Namaste & Welcome! I'm Amit Meena, Founder of Focus Shield. Thank you for installing our app. Lock distracting apps, stay consistent with deep work sessions, and achieve your biggest goals!"
+
+    val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+      .setSmallIcon(R.drawable.ic_launcher_foreground)
+      .setSubText("Founder • Amit Meena")
+      .setContentTitle(welcomeTitle)
+      .setContentText(welcomeShort)
+      .setStyle(
+        NotificationCompat.BigTextStyle()
+          .setBigContentTitle("Welcome from Founder Amit Meena 🛡️")
+          .bigText(welcomeBigText)
+      )
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setDefaults(NotificationCompat.DEFAULT_ALL)
+      .setAutoCancel(true)
+      .setContentIntent(pendingIntent)
+      .build()
+
+    return try {
+      NotificationManagerCompat.from(context).notify(WELCOME_NOTIFICATION_ID, notification)
+      true
+    } catch (_: SecurityException) {
+      false
     }
   }
 

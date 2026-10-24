@@ -124,8 +124,11 @@ fun HomeScreen(
       .padding(horizontal = 20.dp, vertical = 16.dp),
     verticalArrangement = Arrangement.spacedBy(20.dp)
   ) {
-    // 1 & 2. Header Area: App Title, Greeting and Productivity Subtitle
-    HomeHeader()
+    // 1 & 2. Header Area: App Title, Greeting and Live Shield Status
+    HomeHeader(
+      isShieldActive = isShieldActive,
+      blockedAppCount = blockedAppCount
+    )
 
     // 3. Circular Focus-Timer Display
     CircularTimerSection(
@@ -200,14 +203,30 @@ fun HomeScreen(
       onVolumeChange = { vol -> viewModel.setAudioVolume(vol) }
     )
 
-    // 5. Today's Focus-Time Card (Live data from Room DB)
+    // 4d. Pro Smart Shield Hub (Flip-to-Focus #4, Bedtime Sleep Shield #5, Smart Unlock Challenge #1)
+    com.example.ui.components.SmartFeaturesHubSection(
+      isTimerRunning = (status == TimerStatus.RUNNING),
+      onAutoStartFocusFromFlip = {
+        if (status != TimerStatus.RUNNING) {
+          viewModel.startTimer()
+        }
+      },
+      onActivateSleepShieldNow = {
+        viewModel.setMode(TimerMode.FOCUS)
+        viewModel.setCustomDuration(60)
+        viewModel.startTimer()
+        onNavigateToScreen(Screen.Focus)
+      }
+    )
+
+    // 5. Today's Focus-Time Card
     MetricCard(
       title = "Today's Focus Time",
       value = "$todayFocusMinutes min",
-      subtitle = if (todayFocusMinutes > 0) "Saved in local database" else "No sessions recorded today",
+      subtitle = if (todayFocusMinutes > 0) "Tracked across today's deep work" else "Start a session to log focus time",
       icon = Icons.Default.Timer,
       iconTint = ElectricBlue,
-      badgeText = if (todayFocusMinutes > 0) "Local DB" else "Ready",
+      badgeText = if (todayFocusMinutes > 0) "Today" else "Ready",
       testTag = "card_today_focus"
     )
 
@@ -228,7 +247,7 @@ fun HomeScreen(
         subtitle = "Completed today",
         icon = Icons.Default.TaskAlt,
         iconTint = SuccessEmerald,
-        badgeText = "Local DB",
+        badgeText = if (todaySessionsCount > 0) "Done" else null,
         modifier = Modifier.weight(1f),
         testTag = "card_sessions"
       )
@@ -261,7 +280,17 @@ fun HomeScreen(
 }
 
 @Composable
-private fun HomeHeader() {
+private fun HomeHeader(
+  isShieldActive: Boolean,
+  blockedAppCount: Int
+) {
+  val hourOfDay = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+  val greeting = when {
+    hourOfDay < 12 -> "Good Morning • Deep Work"
+    hourOfDay < 17 -> "Good Afternoon • Stay Focused"
+    else -> "Good Evening • Focus Zone"
+  }
+
   Column(
     modifier = Modifier.fillMaxWidth(),
     verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -272,7 +301,7 @@ private fun HomeHeader() {
       verticalAlignment = Alignment.CenterVertically
     ) {
       Text(
-        text = "ADVANCED FOCUS",
+        text = "FOCUS SHIELD PRO",
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.primary,
         letterSpacing = 2.sp,
@@ -281,27 +310,37 @@ private fun HomeHeader() {
 
       Surface(
         shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        color = if (isShieldActive) SuccessEmerald.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(
+          1.dp,
+          if (isShieldActive) SuccessEmerald.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant
+        )
       ) {
         Text(
-          text = "OFFLINE • ROOM DB",
+          text = if (isShieldActive) {
+            "SHIELD ON • $blockedAppCount APPS"
+          } else if (blockedAppCount > 0) {
+            "$blockedAppCount APPS ARMED"
+          } else {
+            "SHIELD READY"
+          },
           style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.tertiary,
+          fontWeight = FontWeight.Bold,
+          color = if (isShieldActive) SuccessEmerald else MaterialTheme.colorScheme.tertiary,
           modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
         )
       }
     }
 
     Text(
-      text = "Deep Work Session",
+      text = greeting,
       style = MaterialTheme.typography.headlineLarge,
       fontWeight = FontWeight.Bold,
       color = MaterialTheme.colorScheme.onBackground
     )
 
     Text(
-      text = "Eliminate distractions and maintain uninterrupted focus.",
+      text = "Lock distracting apps and command your undivided attention.",
       style = MaterialTheme.typography.bodyMedium,
       color = MaterialTheme.colorScheme.onSurfaceVariant
     )
@@ -543,7 +582,7 @@ private fun DailyGoalCard(
           color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-          text = if (currentMinutes > 0) "Tracked from local sessions" else "Sample demonstration target",
+          text = if (currentMinutes >= goalMinutes) "Daily goal achieved! 🔥" else "${(goalMinutes - currentMinutes).coerceAtLeast(0)} min remaining",
           style = MaterialTheme.typography.labelSmall,
           color = MaterialTheme.colorScheme.tertiary
         )
@@ -561,7 +600,7 @@ private fun QuickActionsSection(
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
     Text(
-      text = "Quick Actions",
+      text = "Workspace & Shield Controls",
       style = MaterialTheme.typography.titleMedium,
       fontWeight = FontWeight.Bold,
       color = MaterialTheme.colorScheme.onBackground
@@ -570,7 +609,7 @@ private fun QuickActionsSection(
     // 1. Focus Sessions Action
     QuickActionCard(
       title = "Focus Timer & Presets",
-      description = "Intervals, custom presets & local history",
+      description = "Pomodoro intervals, custom durations & focus tree",
       icon = Icons.Default.Timer,
       iconTint = RadiantViolet,
       onClick = { onNavigateToScreen(Screen.Focus) },
@@ -580,7 +619,7 @@ private fun QuickActionsSection(
     // 2. Installed Apps & Shield Action
     QuickActionCard(
       title = "App Shield & Blocked Apps",
-      description = "Select launchable apps to restrict during focus sessions",
+      description = "Choose distracting apps to lock during active focus",
       icon = Icons.Default.Security,
       iconTint = ElectricBlue,
       onClick = { onNavigateToScreen(Screen.AppBlocker) },
@@ -589,8 +628,8 @@ private fun QuickActionsSection(
 
     // 3. Usage Reports Action
     QuickActionCard(
-      title = "Usage Reports (Preview)",
-      description = "Deep work trends, session logs & focus metrics",
+      title = "Focus Analytics & Daily Planner",
+      description = "7-day charts, task planner, milestones & focus coach",
       icon = Icons.Default.ShowChart,
       iconTint = CyanAccent,
       onClick = { onNavigateToScreen(Screen.Statistics) },

@@ -104,7 +104,7 @@ fun StatisticsScreen(
           color = MaterialTheme.colorScheme.onBackground
         )
         Text(
-          text = "Local analytics, daily planner, rewards, and offline coach",
+          text = "Performance trends, daily planner, milestones & focus coach",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant
         )

@@ -101,8 +101,12 @@ fun AppBlockerScreen(
   val isMasterShieldEnabled by viewModel.isMasterShieldEnabled.collectAsStateWithLifecycle()
   val showExplanationDialog by viewModel.showExplanationDialog.collectAsStateWithLifecycle()
   val showOverlayExplanationDialog by viewModel.showOverlayExplanationDialog.collectAsStateWithLifecycle()
+  val appDailyLimits by viewModel.appDailyLimits.collectAsStateWithLifecycle()
+  val totalScreenTimeTodayMinutes by viewModel.totalScreenTimeTodayMinutes.collectAsStateWithLifecycle()
+  val topUsedAppsToday by viewModel.topUsedAppsToday.collectAsStateWithLifecycle()
 
   var showOnlyBlocked by remember { mutableStateOf(false) }
+  var selectedAppForLimit by remember { mutableStateOf<AppInfo?>(null) }
 
   // Lifecycle observer: Automatically recheck permission when returning from System Settings
   DisposableEffect(lifecycleOwner) {
@@ -132,6 +136,20 @@ fun AppBlockerScreen(
       onOpenOverlaySettings = { viewModel.openOverlaySettings(context) },
       onOpenAppDetailsSettings = { viewModel.openAppDetailsSettings(context) },
       onOpenOverlayListSettings = { viewModel.openOverlaySettingsList(context) }
+    )
+  }
+
+  if (selectedAppForLimit != null) {
+    val targetApp = selectedAppForLimit!!
+    val currentLimit = appDailyLimits[targetApp.packageName] ?: 0
+    AppDailyLimitDialog(
+      app = targetApp,
+      currentLimitMinutes = currentLimit,
+      onDismiss = { selectedAppForLimit = null },
+      onSelectLimit = { limitMins ->
+        viewModel.setAppDailyLimit(targetApp.packageName, targetApp.appName, limitMins)
+        selectedAppForLimit = null
+      }
     )
   }
 
@@ -511,17 +529,31 @@ fun AppBlockerScreen(
             .weight(1f),
           verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+          item(key = "daily_screen_time_analyzer_header") {
+            DailyScreenTimeAnalyzerCard(
+              totalMinutesToday = totalScreenTimeTodayMinutes,
+              activeLimitsCount = appDailyLimits.size,
+              topApps = topUsedAppsToday,
+              isUsageGranted = isUsageGranted
+            )
+          }
+
           items(
             items = displayList,
             key = { it.packageName }
           ) { app ->
             val isBlocked = blockedPackageNames.contains(app.packageName)
+            val dailyLimitMins = appDailyLimits[app.packageName] ?: 0
             AppItemRow(
               app = app,
               isUsageGranted = isUsageGranted,
               isBlocked = isBlocked,
+              dailyLimitMinutes = dailyLimitMins,
               onToggleBlock = {
                 viewModel.toggleAppBlocked(app.packageName, app.appName)
+              },
+              onConfigureLimit = {
+                selectedAppForLimit = app
               }
             )
           }
@@ -529,6 +561,219 @@ fun AppBlockerScreen(
       }
     }
   }
+}
+
+@Composable
+private fun DailyScreenTimeAnalyzerCard(
+  totalMinutesToday: Int,
+  activeLimitsCount: Int,
+  topApps: List<AppInfo>,
+  isUsageGranted: Boolean
+) {
+  val hours = totalMinutesToday / 60
+  val mins = totalMinutesToday % 60
+  val formattedTotal = if (hours > 0) "${hours}h ${mins}m" else "${mins}m"
+
+  Card(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(bottom = 4.dp)
+      .testTag("daily_screen_time_analyzer_card"),
+    shape = RoundedCornerShape(16.dp),
+    colors = CardDefaults.cardColors(
+      containerColor = MaterialTheme.colorScheme.surfaceVariant
+    ),
+    border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.45f))
+  ) {
+    Column(
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Column {
+          Text(
+            text = "📊 Today's Screen-Time & App Limits",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface
+          )
+          Text(
+            text = if (isUsageGranted) {
+              "Real-time usage tracker • Auto-locks when daily limit is reached"
+            } else {
+              "Enable Usage Access above to track real daily app screen time"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+        }
+
+        Surface(
+          shape = RoundedCornerShape(10.dp),
+          color = ElectricBlue.copy(alpha = 0.16f),
+          border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.4f))
+        ) {
+          Text(
+            text = "$formattedTotal today",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = ElectricBlue,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+          )
+        }
+      }
+
+      if (topApps.isNotEmpty()) {
+        val maxAppMillis = topApps.maxOf { it.usageDurationMillis }.coerceAtLeast(60_000L)
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          topApps.forEach { topApp ->
+            val appMins = (topApp.usageDurationMillis / 60_000L).toInt()
+            val ratio = (topApp.usageDurationMillis.toFloat() / maxAppMillis.toFloat()).coerceIn(0.08f, 1f)
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+              Text(
+                text = topApp.appName,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.width(96.dp)
+              )
+              androidx.compose.material3.LinearProgressIndicator(
+                progress = { ratio },
+                modifier = Modifier
+                  .weight(1f)
+                  .height(6.dp),
+                color = ElectricBlue,
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHigh
+              )
+              Text(
+                text = "${appMins}m",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = ElectricBlue
+              )
+            }
+          }
+        }
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+      ) {
+        Text(
+          text = "Tap '⏱️ Limit' on any app below to set a daily cap",
+          style = MaterialTheme.typography.labelSmall,
+          fontSize = 10.sp,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+          text = "$activeLimitsCount app limit(s) active",
+          style = MaterialTheme.typography.labelSmall,
+          fontSize = 10.sp,
+          fontWeight = FontWeight.Bold,
+          color = RadiantViolet
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun AppDailyLimitDialog(
+  app: AppInfo,
+  currentLimitMinutes: Int,
+  onDismiss: () -> Unit,
+  onSelectLimit: (Int) -> Unit
+) {
+  val usedMins = (app.usageDurationMillis / 60_000L).toInt()
+  val presets = listOf(15, 30, 45, 60, 90, 120)
+
+  androidx.compose.material3.AlertDialog(
+    onDismissRequest = onDismiss,
+    title = {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+      ) {
+        Icon(Icons.Default.LockClock, contentDescription = null, tint = ElectricBlue)
+        Column {
+          Text(
+            text = "Daily Time Limit • ${app.appName}",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+          )
+          Text(
+            text = "Used today: ${usedMins}m",
+            style = MaterialTheme.typography.labelSmall,
+            color = ElectricBlue
+          )
+        }
+      }
+    },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+          text = "Automatically lock ${app.appName} for the rest of the day once its daily screen-time limit is reached:",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        presets.chunked(3).forEach { rowItems ->
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+          ) {
+            rowItems.forEach { mins ->
+              val isSelected = currentLimitMinutes == mins
+              OutlinedButton(
+                onClick = { onSelectLimit(mins) },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(
+                  1.dp,
+                  if (isSelected) ElectricBlue else MaterialTheme.colorScheme.outlineVariant
+                ),
+                colors = ButtonDefaults.outlinedButtonColors(
+                  containerColor = if (isSelected) ElectricBlue.copy(alpha = 0.18f) else Color.Transparent,
+                  contentColor = if (isSelected) ElectricBlue else MaterialTheme.colorScheme.onSurface
+                )
+              ) {
+                Text(
+                  text = "${mins}m/day",
+                  style = MaterialTheme.typography.labelSmall,
+                  fontWeight = FontWeight.Bold
+                )
+              }
+            }
+          }
+        }
+      }
+    },
+    confirmButton = {
+      if (currentLimitMinutes > 0) {
+        TextButton(onClick = { onSelectLimit(0) }) {
+          Text("Remove Limit", color = MaterialTheme.colorScheme.error)
+        }
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) {
+        Text("Close")
+      }
+    }
+  )
 }
 
 @Composable
@@ -619,19 +864,26 @@ private fun AppItemRow(
   app: AppInfo,
   isUsageGranted: Boolean,
   isBlocked: Boolean,
-  onToggleBlock: () -> Unit
+  dailyLimitMinutes: Int,
+  onToggleBlock: () -> Unit,
+  onConfigureLimit: () -> Unit
 ) {
+  val usedMinsToday = (app.usageDurationMillis / 60_000L).toInt()
+  val isLimitReached = (dailyLimitMinutes > 0 && usedMinsToday >= dailyLimitMinutes)
+
   Card(
     modifier = Modifier
       .fillMaxWidth()
       .testTag("app_item_${app.packageName}"),
     shape = RoundedCornerShape(14.dp),
     colors = CardDefaults.cardColors(
-      containerColor = if (isBlocked) RadiantViolet.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceVariant
+      containerColor = if (isBlocked || isLimitReached) RadiantViolet.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceVariant
     ),
     border = BorderStroke(
       1.dp,
-      if (isBlocked) RadiantViolet.copy(alpha = 0.4f) else MaterialTheme.colorScheme.outlineVariant
+      if (isLimitReached) MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
+      else if (isBlocked) RadiantViolet.copy(alpha = 0.4f)
+      else MaterialTheme.colorScheme.outlineVariant
     )
   ) {
     Row(
@@ -680,16 +932,54 @@ private fun AppItemRow(
             }
           }
           Spacer(modifier = Modifier.height(2.dp))
-          Text(
-            text = if (isUsageGranted) app.formattedUsage else app.packageName,
-            style = MaterialTheme.typography.bodySmall,
-            fontSize = 11.sp,
-            color = if (isUsageGranted && app.usageDurationMillis > 0) ElectricBlue else MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-          )
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+          ) {
+            Text(
+              text = if (isUsageGranted) app.formattedUsage else app.packageName,
+              style = MaterialTheme.typography.bodySmall,
+              fontSize = 11.sp,
+              color = if (isLimitReached) MaterialTheme.colorScheme.error
+              else if (isUsageGranted && app.usageDurationMillis > 0) ElectricBlue
+              else MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis
+            )
+
+            Surface(
+              shape = RoundedCornerShape(6.dp),
+              color = if (dailyLimitMinutes > 0) ElectricBlue.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceContainerHigh,
+              border = BorderStroke(
+                1.dp,
+                if (dailyLimitMinutes > 0) ElectricBlue.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant
+              ),
+              modifier = Modifier
+                .clickable(onClick = onConfigureLimit)
+                .testTag("btn_limit_${app.packageName}")
+            ) {
+              Text(
+                text = if (isLimitReached) {
+                  "🔴 ${dailyLimitMinutes}m Limit Hit"
+                } else if (dailyLimitMinutes > 0) {
+                  "⏱️ ${dailyLimitMinutes}m/day"
+                } else {
+                  "⏱️ Set Limit"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isLimitReached) MaterialTheme.colorScheme.error
+                else if (dailyLimitMinutes > 0) ElectricBlue
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+              )
+            }
+          }
         }
       }
+
+      Spacer(modifier = Modifier.width(6.dp))
 
       // Shield Toggle Button
       Button(

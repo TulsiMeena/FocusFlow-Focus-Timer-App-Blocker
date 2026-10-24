@@ -397,6 +397,21 @@ fun FocusScreen(
       }
     )
 
+    // 9b. Pro Smart Shield Hub (Flip-to-Focus #4, Bedtime Sleep Shield #5, Smart Unlock Challenge #1)
+    com.example.ui.components.SmartFeaturesHubSection(
+      isTimerRunning = (status == TimerStatus.RUNNING),
+      onAutoStartFocusFromFlip = {
+        if (status != TimerStatus.RUNNING) {
+          viewModel.startTimer()
+        }
+      },
+      onActivateSleepShieldNow = {
+        viewModel.setMode(TimerMode.FOCUS)
+        viewModel.setCustomDuration(60)
+        viewModel.startTimer()
+      }
+    )
+
     // 10. Daily Inspirational Focus Mantra
     DailyMantraCard(
       quote = currentQuote,

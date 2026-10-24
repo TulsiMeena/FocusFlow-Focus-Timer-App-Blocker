@@ -85,7 +85,8 @@ class FocusBlockOverlayManager(private val context: Context) {
   fun showBlockOverlay(
     appName: String,
     packageName: String,
-    isStrictMode: Boolean
+    isStrictMode: Boolean,
+    lockReasonBadge: String? = null
   ) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
       Log.w(TAG, "Cannot show WindowManager overlay: SYSTEM_ALERT_WINDOW permission is not granted")
@@ -96,7 +97,7 @@ class FocusBlockOverlayManager(private val context: Context) {
       try {
         if (isOverlayAttached && overlayView != null) {
           currentlyBlockedPackage = packageName
-          updateOverlayContent(appName, packageName, isStrictMode)
+          updateOverlayContent(appName, packageName, isStrictMode, lockReasonBadge)
           return@post
         }
 
@@ -104,7 +105,7 @@ class FocusBlockOverlayManager(private val context: Context) {
         hasRedirected = false
         countdownEndEpoch = SystemClock.elapsedRealtime() + (COUNTDOWN_TOTAL_SECONDS * 1000L)
 
-        val view = createFullScreenOverlayView(appName, packageName, isStrictMode)
+        val view = createFullScreenOverlayView(appName, packageName, isStrictMode, lockReasonBadge)
         val params = createLayoutParams()
 
         windowManager.addView(view, params)
@@ -156,6 +157,7 @@ class FocusBlockOverlayManager(private val context: Context) {
   private fun startCountdown(appName: String) {
     stopCountdown()
 
+    var lastFormattedText = ""
     countdownRunnable = object : Runnable {
       override fun run() {
         val now = SystemClock.elapsedRealtime()
@@ -164,7 +166,10 @@ class FocusBlockOverlayManager(private val context: Context) {
         val minutes = remaining / 60
         val seconds = remaining % 60
         val formatted = String.format(Locale.US, "%02d:%02d", minutes, seconds)
-        countdownTextView?.text = formatted
+        if (formatted != lastFormattedText) {
+          lastFormattedText = formatted
+          countdownTextView?.text = formatted
+        }
 
         val fraction = (remainingMillis.toFloat() / (COUNTDOWN_TOTAL_SECONDS * 1000f)).coerceIn(0f, 1f)
         radarRingView?.setProgress(fraction)
@@ -189,6 +194,7 @@ class FocusBlockOverlayManager(private val context: Context) {
   }
 
   private fun redirectToFocus(appName: String) {
+    FocusShieldService.notifyOverlayActionTaken()
     val focusIntent = Intent(context, MainActivity::class.java).apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
       putExtra(MainActivity.EXTRA_NAVIGATE_TO, Screen.Focus.route)
@@ -201,9 +207,14 @@ class FocusBlockOverlayManager(private val context: Context) {
     hideBlockOverlay()
   }
 
-  private fun updateOverlayContent(appName: String, packageName: String, isStrictMode: Boolean) {
+  private fun updateOverlayContent(
+    appName: String,
+    packageName: String,
+    isStrictMode: Boolean,
+    lockReasonBadge: String? = null
+  ) {
     appNameTextView?.text = "🔒  $appName is Locked"
-    strictBadgeView?.text = if (isStrictMode) {
+    strictBadgeView?.text = lockReasonBadge ?: if (isStrictMode) {
       "⚡ STRICT FOCUS SHIELD ACTIVE"
     } else {
       "🛡️ FOCUS MODE ACTIVE • APP SHIELDED"
@@ -218,10 +229,12 @@ class FocusBlockOverlayManager(private val context: Context) {
   private fun createFullScreenOverlayView(
     appName: String,
     packageName: String,
-    isStrictMode: Boolean
+    isStrictMode: Boolean,
+    lockReasonBadge: String? = null
   ): View {
     val density = context.resources.displayMetrics.density
     fun dp(value: Int): Int = (value * density).toInt()
+    val smartPrefs = SmartShieldPreferencesManager.getInstance(context)
 
     // 1. True Full-Screen Edge-to-Edge Container
     val rootLayout = FrameLayout(context).apply {
@@ -243,7 +256,7 @@ class FocusBlockOverlayManager(private val context: Context) {
     val contentColumn = LinearLayout(context).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER_HORIZONTAL
-      setPadding(dp(24), dp(48), dp(24), dp(36))
+      setPadding(dp(22), dp(42), dp(22), dp(28))
     }
 
     val contentParams = FrameLayout.LayoutParams(
@@ -253,7 +266,7 @@ class FocusBlockOverlayManager(private val context: Context) {
 
     // 3. Top Status Header Pill
     val pillView = TextView(context).apply {
-      text = if (isStrictMode) {
+      text = lockReasonBadge ?: if (isStrictMode) {
         "⚡ STRICT FOCUS SHIELD ACTIVE"
       } else {
         "🛡️ FOCUS MODE ACTIVE • APP SHIELDED"
@@ -281,12 +294,12 @@ class FocusBlockOverlayManager(private val context: Context) {
         LinearLayout.LayoutParams.WRAP_CONTENT
       ).apply {
         gravity = Gravity.CENTER_HORIZONTAL
-        bottomMargin = dp(18)
+        bottomMargin = dp(14)
       }
     )
 
     // 4. Center Radar Ring + Real App Icon + 60s Digital Timer
-    val ringSizePx = dp(236)
+    val ringSizePx = dp(216)
     val radarContainer = FrameLayout(context)
     val ringView = NeonProgressRingView(context, isStrictMode)
     radarRingView = ringView
@@ -308,7 +321,7 @@ class FocusBlockOverlayManager(private val context: Context) {
         setStroke(dp(2), Color.parseColor("#9D4EDD"))
       }
       background = circleBg
-      setPadding(dp(10), dp(10), dp(10), dp(10))
+      setPadding(dp(8), dp(8), dp(8), dp(8))
     }
 
     val iconImage = ImageView(context).apply {
@@ -323,20 +336,20 @@ class FocusBlockOverlayManager(private val context: Context) {
     appIconView = iconImage
     iconWrapper.addView(
       iconImage,
-      FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER)
+      FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER)
     )
     ringInnerColumn.addView(
       iconWrapper,
-      LinearLayout.LayoutParams(dp(64), dp(64)).apply {
+      LinearLayout.LayoutParams(dp(58), dp(58)).apply {
         gravity = Gravity.CENTER_HORIZONTAL
-        bottomMargin = dp(8)
+        bottomMargin = dp(6)
       }
     )
 
     // Large 60-Second Countdown (MM:SS)
     val timerView = TextView(context).apply {
       text = "01:00"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 40f)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 36f)
       setTextColor(Color.parseColor("#00E5FF"))
       typeface = Typeface.MONOSPACE
       paint.isFakeBoldText = true
@@ -380,14 +393,14 @@ class FocusBlockOverlayManager(private val context: Context) {
       radarContainer,
       LinearLayout.LayoutParams(ringSizePx, ringSizePx).apply {
         gravity = Gravity.CENTER_HORIZONTAL
-        bottomMargin = dp(18)
+        bottomMargin = dp(12)
       }
     )
 
     // 5. Bold Headline & Subtitle
     val titleView = TextView(context).apply {
       text = "YOUR FOCUS MATTERS"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
       setTextColor(Color.WHITE)
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
@@ -404,7 +417,7 @@ class FocusBlockOverlayManager(private val context: Context) {
 
     val subView = TextView(context).apply {
       text = "This app is paused while you focus."
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
       setTextColor(Color.parseColor("#00E5FF"))
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
@@ -416,19 +429,19 @@ class FocusBlockOverlayManager(private val context: Context) {
         LinearLayout.LayoutParams.MATCH_PARENT,
         LinearLayout.LayoutParams.WRAP_CONTENT
       ).apply {
-        topMargin = dp(4)
-        bottomMargin = dp(10)
+        topMargin = dp(3)
+        bottomMargin = dp(8)
       }
     )
 
     // Blocked App Badge
     val appBadge = TextView(context).apply {
       text = "🔒  $appName is Locked"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
       setTextColor(Color.WHITE)
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
-      setPadding(dp(16), dp(7), dp(16), dp(7))
+      setPadding(dp(14), dp(6), dp(14), dp(6))
 
       val badgeBg = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
@@ -446,7 +459,7 @@ class FocusBlockOverlayManager(private val context: Context) {
         LinearLayout.LayoutParams.WRAP_CONTENT
       ).apply {
         gravity = Gravity.CENTER_HORIZONTAL
-        bottomMargin = dp(16)
+        bottomMargin = dp(12)
       }
     )
 
@@ -454,10 +467,10 @@ class FocusBlockOverlayManager(private val context: Context) {
     val quote = FocusQuotesRepository.getRandomQuote()
     val quoteCard = LinearLayout(context).apply {
       orientation = LinearLayout.VERTICAL
-      setPadding(dp(18), dp(14), dp(18), dp(14))
+      setPadding(dp(16), dp(12), dp(16), dp(12))
       val qBg = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(18).toFloat()
+        cornerRadius = dp(16).toFloat()
         setColor(Color.parseColor("#121524"))
         setStroke(dp(1), Color.parseColor("#262B44"))
       }
@@ -466,7 +479,7 @@ class FocusBlockOverlayManager(private val context: Context) {
 
     val quoteText = TextView(context).apply {
       text = "“${quote.text}”"
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
       setTextColor(Color.parseColor("#E2E8F0"))
       setTypeface(typeface, Typeface.ITALIC)
       gravity = Gravity.CENTER
@@ -486,7 +499,7 @@ class FocusBlockOverlayManager(private val context: Context) {
         LinearLayout.LayoutParams.MATCH_PARENT,
         LinearLayout.LayoutParams.WRAP_CONTENT
       ).apply {
-        topMargin = dp(6)
+        topMargin = dp(4)
       }
     )
 
@@ -496,7 +509,162 @@ class FocusBlockOverlayManager(private val context: Context) {
         LinearLayout.LayoutParams.MATCH_PARENT,
         LinearLayout.LayoutParams.WRAP_CONTENT
       ).apply {
-        bottomMargin = dp(16)
+        bottomMargin = dp(10)
+      }
+    )
+
+    // 6b. Smart Brain Unlock Challenge Panel (Collapsible)
+    var currentChallenge = smartPrefs.generateMathChallenge()
+    var typedAnswer = ""
+
+    val challengeContainer = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      visibility = View.GONE
+      setPadding(dp(14), dp(12), dp(14), dp(12))
+      val chBg = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dp(16).toFloat()
+        setColor(Color.parseColor("#11162B"))
+        setStroke(dp(1), Color.parseColor("#00E5FF"))
+      }
+      background = chBg
+    }
+
+    val challengeHeader = TextView(context).apply {
+      text = "🧠 SOLVE TO UNLOCK FOR 2 MINUTES"
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+      setTextColor(Color.parseColor("#00E5FF"))
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+    }
+    challengeContainer.addView(challengeHeader)
+
+    val challengeProblemView = TextView(context).apply {
+      text = "${currentChallenge.expression}   [ Ans: _ ]"
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+      setTextColor(Color.WHITE)
+      typeface = Typeface.MONOSPACE
+      paint.isFakeBoldText = true
+      gravity = Gravity.CENTER
+      setPadding(0, dp(6), 0, dp(6))
+    }
+    challengeContainer.addView(challengeProblemView)
+
+    val challengeStatusView = TextView(context).apply {
+      text = "Use keypad below to enter the exact answer"
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+      setTextColor(Color.parseColor("#94A3B8"))
+      gravity = Gravity.CENTER
+    }
+    challengeContainer.addView(challengeStatusView)
+
+    fun refreshChallengeDisplay() {
+      val shown = if (typedAnswer.isEmpty()) "_" else typedAnswer
+      challengeProblemView.text = "${currentChallenge.expression}   [ $shown ]"
+    }
+
+    // Compact 2-Row Cyber Keypad inside Overlay (0-9, CLR, Verify)
+    val row1 = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER
+    }
+    val row2 = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER
+    }
+
+    fun makeKeyButton(label: String, onClick: () -> Unit): Button {
+      return Button(context).apply {
+        text = label
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        setTextColor(Color.WHITE)
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(0, 0, 0, 0)
+        background = GradientDrawable().apply {
+          shape = GradientDrawable.RECTANGLE
+          cornerRadius = dp(8).toFloat()
+          setColor(Color.parseColor("#1E2540"))
+          setStroke(dp(1), Color.parseColor("#354068"))
+        }
+        setOnClickListener { onClick() }
+      }
+    }
+
+    listOf("1", "2", "3", "4", "5", "CLR").forEach { key ->
+      val btn = makeKeyButton(key) {
+        if (key == "CLR") {
+          typedAnswer = ""
+        } else if (typedAnswer.length < 5) {
+          typedAnswer += key
+        }
+        refreshChallengeDisplay()
+      }
+      row1.addView(
+        btn,
+        LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+          setMargins(dp(2), dp(4), dp(2), dp(2))
+        }
+      )
+    }
+
+    listOf("6", "7", "8", "9", "0", "⌫").forEach { key ->
+      val btn = makeKeyButton(key) {
+        if (key == "⌫") {
+          if (typedAnswer.isNotEmpty()) typedAnswer = typedAnswer.dropLast(1)
+        } else if (typedAnswer.length < 5) {
+          typedAnswer += key
+        }
+        refreshChallengeDisplay()
+      }
+      row2.addView(
+        btn,
+        LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+          setMargins(dp(2), dp(2), dp(2), dp(6))
+        }
+      )
+    }
+
+    challengeContainer.addView(row1)
+    challengeContainer.addView(row2)
+
+    val verifyBtn = Button(context).apply {
+      text = "✓ VERIFY & UNLOCK 2 MINS"
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+      setTextColor(Color.BLACK)
+      typeface = Typeface.DEFAULT_BOLD
+      background = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dp(10).toFloat()
+        setColor(Color.parseColor("#00E5FF"))
+      }
+      setOnClickListener {
+        val entered = typedAnswer.toIntOrNull()
+        if (entered != null && entered == currentChallenge.expectedAnswer) {
+          smartPrefs.grantTemporaryUnlock(packageName, 2)
+          hideBlockOverlay()
+        } else {
+          challengeStatusView.text = "❌ Wrong answer! Try again: ${currentChallenge.hint}"
+          challengeStatusView.setTextColor(Color.parseColor("#FF6B6B"))
+          typedAnswer = ""
+          refreshChallengeDisplay()
+        }
+      }
+    }
+    challengeContainer.addView(
+      verifyBtn,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        dp(38)
+      )
+    )
+
+    contentColumn.addView(
+      challengeContainer,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        bottomMargin = dp(8)
       }
     )
 
@@ -538,7 +706,7 @@ class FocusBlockOverlayManager(private val context: Context) {
       returnBtn,
       LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT,
-        dp(54)
+        dp(52)
       )
     )
 
@@ -565,11 +733,49 @@ class FocusBlockOverlayManager(private val context: Context) {
       homeBtn,
       LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT,
-        dp(50)
+        dp(48)
       ).apply {
-        topMargin = dp(10)
+        topMargin = dp(8)
       }
     )
+
+    if (smartPrefs.isSmartChallengeEnabled.value) {
+      val challengeToggleBtn = Button(context).apply {
+        text = "🧠  SMART UNLOCK CHALLENGE (2 MIN ACCESS)"
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        setTextColor(Color.parseColor("#00E5FF"))
+        typeface = Typeface.DEFAULT_BOLD
+
+        background = GradientDrawable().apply {
+          shape = GradientDrawable.RECTANGLE
+          cornerRadius = dp(14).toFloat()
+          setColor(Color.parseColor("#101526"))
+          setStroke(dp(1), Color.parseColor("#00E5FF"))
+        }
+
+        setOnClickListener {
+          if (challengeContainer.visibility == View.VISIBLE) {
+            challengeContainer.visibility = View.GONE
+            quoteCard.visibility = View.VISIBLE
+          } else {
+            currentChallenge = smartPrefs.generateMathChallenge()
+            typedAnswer = ""
+            refreshChallengeDisplay()
+            challengeContainer.visibility = View.VISIBLE
+            quoteCard.visibility = View.GONE
+          }
+        }
+      }
+      contentColumn.addView(
+        challengeToggleBtn,
+        LinearLayout.LayoutParams(
+          LinearLayout.LayoutParams.MATCH_PARENT,
+          dp(42)
+        ).apply {
+          topMargin = dp(8)
+        }
+      )
+    }
 
     // Hardware Back key handling
     rootLayout.setOnKeyListener { _, keyCode, event ->
@@ -607,6 +813,7 @@ class FocusBlockOverlayManager(private val context: Context) {
   }
 
   fun goToHomeScreen() {
+    FocusShieldService.notifyOverlayActionTaken()
     val homeIntent = Intent(Intent.ACTION_MAIN).apply {
       addCategory(Intent.CATEGORY_HOME)
       flags = Intent.FLAG_ACTIVITY_NEW_TASK

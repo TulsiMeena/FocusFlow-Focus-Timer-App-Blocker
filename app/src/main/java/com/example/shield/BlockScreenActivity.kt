@@ -120,11 +120,13 @@ class BlockScreenActivity : ComponentActivity() {
     const val EXTRA_BLOCKED_APP_NAME = "EXTRA_BLOCKED_APP_NAME"
     const val EXTRA_BLOCKED_PACKAGE_NAME = "EXTRA_BLOCKED_PACKAGE_NAME"
     const val EXTRA_IS_STRICT = "EXTRA_IS_STRICT"
+    const val EXTRA_LOCK_REASON_BADGE = "EXTRA_LOCK_REASON_BADGE"
   }
 
   private val blockedAppNameState = mutableStateOf("Restricted App")
   private val blockedPackageNameState = mutableStateOf("")
   private val isStrictModeState = mutableStateOf(false)
+  private val lockReasonBadgeState = mutableStateOf<String?>(null)
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -139,17 +141,20 @@ class BlockScreenActivity : ComponentActivity() {
     blockedAppNameState.value = intent.getStringExtra(EXTRA_BLOCKED_APP_NAME) ?: "Restricted App"
     blockedPackageNameState.value = intent.getStringExtra(EXTRA_BLOCKED_PACKAGE_NAME) ?: ""
     isStrictModeState.value = intent.getBooleanExtra(EXTRA_IS_STRICT, false)
+    lockReasonBadgeState.value = intent.getStringExtra(EXTRA_LOCK_REASON_BADGE)
 
     setContent {
       AdvancedFocusTheme {
         val currentAppName = blockedAppNameState.value
         val currentPkgName = blockedPackageNameState.value
         val currentStrict = isStrictModeState.value
+        val currentBadge = lockReasonBadgeState.value
 
         BlockScreenContent(
           blockedAppName = currentAppName,
           blockedPackageName = currentPkgName,
           isStrictMode = currentStrict,
+          lockReasonBadge = currentBadge,
           onReturnToFocus = {
             returnToFocusApp(currentAppName)
           },
@@ -158,6 +163,10 @@ class BlockScreenActivity : ComponentActivity() {
           },
           onEmergencyExit = {
             performEmergencyExit()
+          },
+          onSmartUnlockSuccess = {
+            SmartShieldPreferencesManager.getInstance(applicationContext).grantTemporaryUnlock(currentPkgName, 2)
+            finish()
           }
         )
       }
@@ -174,9 +183,11 @@ class BlockScreenActivity : ComponentActivity() {
     intent.getStringExtra(EXTRA_BLOCKED_APP_NAME)?.let { blockedAppNameState.value = it }
     intent.getStringExtra(EXTRA_BLOCKED_PACKAGE_NAME)?.let { blockedPackageNameState.value = it }
     isStrictModeState.value = intent.getBooleanExtra(EXTRA_IS_STRICT, isStrictModeState.value)
+    lockReasonBadgeState.value = intent.getStringExtra(EXTRA_LOCK_REASON_BADGE)
   }
 
   private fun returnToFocusApp(appName: String) {
+    FocusShieldService.notifyOverlayActionTaken()
     val focusIntent = Intent(this, MainActivity::class.java).apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
       putExtra(MainActivity.EXTRA_NAVIGATE_TO, Screen.Focus.route)
@@ -190,6 +201,7 @@ class BlockScreenActivity : ComponentActivity() {
   }
 
   private fun goToHomeScreen() {
+    FocusShieldService.notifyOverlayActionTaken()
     val homeIntent = Intent(Intent.ACTION_MAIN).apply {
       addCategory(Intent.CATEGORY_HOME)
       flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -246,9 +258,11 @@ fun BlockScreenContent(
   blockedAppName: String,
   blockedPackageName: String = "",
   isStrictMode: Boolean,
+  lockReasonBadge: String? = null,
   onReturnToFocus: () -> Unit,
   onGoToHomeScreen: () -> Unit,
-  onEmergencyExit: () -> Unit
+  onEmergencyExit: () -> Unit = {},
+  onSmartUnlockSuccess: () -> Unit = {}
 ) {
   val context = LocalContext.current
   val scrollState = rememberScrollState()
@@ -468,7 +482,8 @@ fun BlockScreenContent(
             isStrictMode = isStrictMode,
             isSessionActive = isSessionActiveInDb,
             isSessionPaused = isSessionPausedInDb,
-            pulseAlpha = pulseAlpha
+            pulseAlpha = pulseAlpha,
+            lockReasonBadge = lockReasonBadge
           )
 
           // 2. DUAL CONCENTRIC CYBER RADAR & 60S COUNTDOWN RING
@@ -878,81 +893,151 @@ fun BlockScreenContent(
             )
           }
 
-          // 7. EMERGENCY EXIT SECTION (Strict Mode Safeguards)
-          if (isStrictMode) {
-            TextButton(
-              onClick = { showEmergencyDetails = !showEmergencyDetails },
-              modifier = Modifier.testTag("emergency_toggle_button")
+          // Smart Unlock Challenge (2-Min Emergency Access via Brain Puzzle)
+          val smartPrefs = remember(context) { SmartShieldPreferencesManager.getInstance(context) }
+          val isSmartChallengeEnabled = smartPrefs.isSmartChallengeEnabled.value
+          var showChallengeCard by remember { mutableStateOf(false) }
+          var currentChallenge by remember { mutableStateOf(smartPrefs.generateMathChallenge()) }
+          var typedDigits by remember { mutableStateOf("") }
+          var challengeError by remember { mutableStateOf<String?>(null) }
+
+          if (isSmartChallengeEnabled) {
+            OutlinedButton(
+              onClick = {
+                if (!showChallengeCard) {
+                  currentChallenge = smartPrefs.generateMathChallenge()
+                  typedDigits = ""
+                  challengeError = null
+                }
+                showChallengeCard = !showChallengeCard
+              },
+              modifier = Modifier
+                .fillMaxWidth()
+                .height(46.dp)
+                .testTag("block_screen_smart_challenge_button"),
+              shape = RoundedCornerShape(14.dp),
+              border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.65f)),
+              colors = ButtonDefaults.outlinedButtonColors(contentColor = ElectricCyan)
             ) {
               Text(
-                text = if (showEmergencyDetails) "Hide Emergency Option" else "Emergency Exit",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error
+                text = if (showChallengeCard) "Hide Smart Unlock Challenge" else "🧠 Smart Unlock Challenge (2 Min Access)",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
               )
             }
 
-            AnimatedVisibility(visible = showEmergencyDetails) {
-              Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .padding(top = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            AnimatedVisibility(visible = showChallengeCard) {
+              Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF11162B)),
+                border = BorderStroke(1.dp, ElectricCyan),
+                modifier = Modifier.fillMaxWidth()
               ) {
-                Text(
-                  text = "Hold button for 3 seconds to cancel session:",
-                  style = MaterialTheme.typography.bodySmall,
-                  color = MaterialTheme.colorScheme.error
-                )
-
-                Surface(
-                  shape = RoundedCornerShape(12.dp),
-                  color = MaterialTheme.colorScheme.errorContainer,
+                Column(
                   modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("emergency_hold_button")
-                    .pointerInput(Unit) {
-                      detectTapGestures(
-                        onPress = {
-                          isHoldingEmergency = true
-                          tryAwaitRelease()
-                          isHoldingEmergency = false
-                        }
-                      )
-                    }
+                    .padding(14.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally,
+                  verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                  Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
+                  Text(
+                    text = "SOLVE BRAIN PUZZLE FOR 2-MIN URGENT ACCESS",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                      fontWeight = FontWeight.Bold,
+                      letterSpacing = 0.8.sp
+                    ),
+                    color = ElectricCyan
+                  )
+
+                  Text(
+                    text = "${currentChallenge.expression}   [ ${if (typedDigits.isEmpty()) "_" else typedDigits} ]",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                      fontFamily = FontFamily.Monospace,
+                      fontWeight = FontWeight.Bold
+                    ),
+                    color = Color.White
+                  )
+
+                  if (challengeError != null) {
+                    Text(
+                      text = challengeError ?: "",
+                      style = MaterialTheme.typography.bodySmall,
+                      color = Color(0xFFFF6B6B),
+                      textAlign = TextAlign.Center
+                    )
+                  }
+
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                    listOf("1", "2", "3", "4", "5", "CLR").forEach { key ->
+                      OutlinedButton(
+                        onClick = {
+                          if (key == "CLR") typedDigits = ""
+                          else if (typedDigits.length < 5) typedDigits += key
+                        },
+                        modifier = Modifier
+                          .weight(1f)
+                          .height(38.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, Color(0xFF354068))
+                      ) {
+                        Text(key, style = MaterialTheme.typography.labelSmall, color = Color.White)
+                      }
+                    }
+                  }
+
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                    listOf("6", "7", "8", "9", "0", "⌫").forEach { key ->
+                      OutlinedButton(
+                        onClick = {
+                          if (key == "⌫") {
+                            if (typedDigits.isNotEmpty()) typedDigits = typedDigits.dropLast(1)
+                          } else if (typedDigits.length < 5) {
+                            typedDigits += key
+                          }
+                        },
+                        modifier = Modifier
+                          .weight(1f)
+                          .height(38.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, Color(0xFF354068))
+                      ) {
+                        Text(key, style = MaterialTheme.typography.labelSmall, color = Color.White)
+                      }
+                    }
+                  }
+
+                  Button(
+                    onClick = {
+                      val entered = typedDigits.toIntOrNull()
+                      if (entered != null && entered == currentChallenge.expectedAnswer) {
+                        onSmartUnlockSuccess()
+                      } else {
+                        challengeError = "Wrong answer! ${currentChallenge.hint}"
+                        typedDigits = ""
+                      }
+                    },
+                    modifier = Modifier
+                      .fillMaxWidth()
+                      .height(42.dp)
+                      .testTag("verify_smart_challenge_button"),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                      containerColor = ElectricCyan,
+                      contentColor = Color.Black
+                    )
                   ) {
                     Text(
-                      text = if (isHoldingEmergency) "Hold to Exit..." else "Hold for 3s to Cancel Session",
-                      style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                      color = MaterialTheme.colorScheme.onErrorContainer
+                      text = "✓ Verify & Unlock for 2 Mins",
+                      style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
                     )
                   }
                 }
-
-                if (holdProgress > 0f) {
-                  LinearProgressIndicator(
-                    progress = { holdProgress },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.error
-                  )
-                }
               }
-            }
-          } else if (isSessionActiveInDb) {
-            TextButton(
-              onClick = onEmergencyExit,
-              modifier = Modifier.testTag("cancel_session_button")
-            ) {
-              Text(
-                text = "End Focus Session",
-                style = MaterialTheme.typography.labelMedium,
-                color = Color(0xFF666E85)
-              )
             }
           }
         }
@@ -966,7 +1051,8 @@ private fun FocusActiveIndicatorPill(
   isStrictMode: Boolean,
   isSessionActive: Boolean,
   isSessionPaused: Boolean,
-  pulseAlpha: Float
+  pulseAlpha: Float,
+  lockReasonBadge: String? = null
 ) {
   Surface(
     shape = RoundedCornerShape(20.dp),
@@ -986,13 +1072,13 @@ private fun FocusActiveIndicatorPill(
           .size(8.dp)
           .clip(CircleShape)
           .background(
-            if (!isSessionActive) Color(0xFFA0A7BD)
+            if (!isSessionActive && lockReasonBadge == null) Color(0xFFA0A7BD)
             else if (isSessionPaused) Color(0xFFFFB236)
             else ElectricCyan.copy(alpha = pulseAlpha)
           )
       )
 
-      val statusText = when {
+      val statusText = lockReasonBadge ?: when {
         !isSessionActive -> "SESSION ENDED"
         isSessionPaused -> "FOCUS MODE PAUSED"
         isStrictMode -> "STRICT FOCUS MODE ACTIVE"

@@ -118,6 +118,12 @@ class FocusShieldService : Service() {
         Log.e(TAG, "Failed to update FocusShieldService", e)
       }
     }
+    @Volatile
+    private var suppressUntilEpochMillis: Long = 0L
+
+    fun notifyOverlayActionTaken() {
+      suppressUntilEpochMillis = System.currentTimeMillis() + 2_200L
+    }
   }
 
   private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -131,6 +137,7 @@ class FocusShieldService : Service() {
 
   private var lastAlertTimeMillis = 0L
   private var lastAlertedPackage = ""
+  private var lastKnownForegroundPackage: String? = null
   private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
   override fun onCreate() {
@@ -204,14 +211,40 @@ class FocusShieldService : Service() {
     return pkg == "com.android.systemui" ||
       pkg == "android" ||
       pkg.contains("inputmethod") ||
-      pkg.contains("keyboard")
+      pkg.contains("keyboard") ||
+      pkg.contains("permissioncontroller")
+  }
+
+  private fun getAppTodayUsageMinutes(
+    usageStatsManager: UsageStatsManager,
+    targetPackage: String
+  ): Int {
+    return try {
+      val cal = java.util.Calendar.getInstance().apply {
+        set(java.util.Calendar.HOUR_OF_DAY, 0)
+        set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0)
+        set(java.util.Calendar.MILLISECOND, 0)
+      }
+      val stats = usageStatsManager.queryUsageStats(
+        UsageStatsManager.INTERVAL_DAILY,
+        cal.timeInMillis,
+        System.currentTimeMillis()
+      ) ?: emptyList()
+      val totalMillis = stats.filter { it.packageName == targetPackage }
+        .sumOf { it.totalTimeInForeground }
+      (totalMillis / 60_000L).toInt()
+    } catch (_: Exception) {
+      0
+    }
   }
 
   private fun startMonitoring() {
     monitorJob?.cancel()
 
-    if (blockedPackageSet.isEmpty()) {
-      Log.i(TAG, "No blocked packages configured for monitoring")
+    val smartPrefs = SmartShieldPreferencesManager.getInstance(applicationContext)
+    if (blockedPackageSet.isEmpty() && smartPrefs.appDailyLimits.value.isEmpty()) {
+      Log.i(TAG, "No blocked packages or daily limits configured for monitoring")
       overlayManager.hideBlockOverlay()
       return
     }
@@ -227,12 +260,19 @@ class FocusShieldService : Service() {
       while (isActive) {
         val now = System.currentTimeMillis()
 
-        if (UsagePermissionHelper.isUsageAccessGranted(applicationContext)) {
-          var foregroundPackage: String? = null
+        // Wait briefly if user just clicked Return to Focus or Go to Home on the overlay
+        if (now < suppressUntilEpochMillis) {
+          lastKnownForegroundPackage = packageName
+          delay(POLL_INTERVAL_MS)
+          continue
+        }
 
-          // 1. Check UsageEvents with a 30-second window
+        if (UsagePermissionHelper.isUsageAccessGranted(applicationContext)) {
+          var detectedPackage: String? = null
+
+          // 1. Check UsageEvents (including our own packageName so returning to Focus App is detected!)
           val events = try {
-            usageStatsManager.queryEvents(now - 30_000L, now)
+            usageStatsManager.queryEvents(now - 15_000L, now)
           } catch (e: Exception) {
             null
           }
@@ -243,92 +283,125 @@ class FocusShieldService : Service() {
             while (events.hasNextEvent()) {
               events.getNextEvent(event)
               val pkg = event.packageName
-              if (pkg != null && pkg != packageName && !isTransientSystemUiOrIme(pkg)) {
+              if (pkg != null && !isTransientSystemUiOrIme(pkg)) {
                 if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
                   if (event.timeStamp >= latestEventTime) {
                     latestEventTime = event.timeStamp
-                    foregroundPackage = pkg
+                    detectedPackage = pkg
                   }
                 }
               }
             }
           }
 
-          // 2. Fallback to queryUsageStats if no foreground event identified
-          if (foregroundPackage == null) {
+          if (detectedPackage != null) {
+            lastKnownForegroundPackage = detectedPackage
+          } else if (lastKnownForegroundPackage == null) {
             try {
               val statsList = usageStatsManager.queryUsageStats(
                 UsageStatsManager.INTERVAL_BEST,
-                now - 60_000L,
+                now - 30_000L,
                 now
               )
               val recent = statsList
-                ?.filter { it.packageName != null && it.packageName != packageName && !isTransientSystemUiOrIme(it.packageName) }
+                ?.filter { it.packageName != null && !isTransientSystemUiOrIme(it.packageName) }
                 ?.maxByOrNull { it.lastTimeUsed }
-              if (recent != null && (now - recent.lastTimeUsed) < 60_000L) {
-                foregroundPackage = recent.packageName
+              if (recent != null && (now - recent.lastTimeUsed) < 15_000L) {
+                lastKnownForegroundPackage = recent.packageName
               }
             } catch (_: Exception) {
             }
           }
 
-          // 3. Match against blocked packages
-          if (foregroundPackage != null && blockedPackageSet.contains(foregroundPackage)) {
-            val appLabel = labelsMap[foregroundPackage] ?: foregroundPackage
-            val timeSinceLast = now - lastAlertTimeMillis
+          val foregroundPackage = lastKnownForegroundPackage
 
-            if (timeSinceLast > INTERVENTION_COOLDOWN_MS || lastAlertedPackage != foregroundPackage || !overlayManager.isShowing) {
-              lastAlertTimeMillis = now
-              lastAlertedPackage = foregroundPackage
-              _lastDetectedPackage.value = foregroundPackage
+          if (foregroundPackage != null && foregroundPackage != packageName) {
+            // Check 1: Did the user unlock this package for 2 minutes via Smart Unlock Challenge?
+            if (smartPrefs.isPackageTemporarilyUnlocked(foregroundPackage)) {
+              if (overlayManager.isShowing && overlayManager.currentPackage == foregroundPackage) {
+                overlayManager.hideBlockOverlay()
+              }
+              delay(POLL_INTERVAL_MS)
+              continue
+            }
 
-              val timestampStr = timeFormat.format(Date(now))
-              Log.i(TAG, "Restricted app intercepted: $appLabel ($foregroundPackage) [strict=$isStrictMode]")
+            // Check 2: Determine if app should be blocked (Focus Mode, Sleep Shield, or Daily Limit)
+            val isInBlockedSet = blockedPackageSet.contains(foregroundPackage)
+            val isSleepWindowNow = smartPrefs.isCurrentlyInSleepWindow()
+            val dailyLimitMins = smartPrefs.getAppDailyLimitMinutes(foregroundPackage)
+            val usedMinsToday = if (dailyLimitMins > 0) {
+              getAppTodayUsageMinutes(usageStatsManager, foregroundPackage)
+            } else 0
+            val isDailyLimitExceeded = (dailyLimitMins > 0 && usedMinsToday >= dailyLimitMins)
 
+            val shouldBlock = isInBlockedSet || isDailyLimitExceeded
+            val lockReasonBadge: String? = when {
+              isDailyLimitExceeded -> "⏳ DAILY LIMIT REACHED (${usedMinsToday}M / ${dailyLimitMins}M)"
+              isSleepWindowNow && isInBlockedSet -> "🌙 SLEEP SHIELD ACTIVE • BEDTIME LOCK"
+              else -> null
+            }
+
+            if (shouldBlock) {
+              val appLabel = labelsMap[foregroundPackage] ?: try {
+                val appInfo = packageManager.getApplicationInfo(foregroundPackage, 0)
+                packageManager.getApplicationLabel(appInfo).toString()
+              } catch (_: Exception) {
+                foregroundPackage
+              }
               val hasOverlayPermission = OverlayPermissionHelper.isOverlayPermissionGranted(applicationContext)
 
               if (hasOverlayPermission) {
-                // Tier 1: System-level full-screen WindowManager overlay covering the restricted app
-                overlayManager.showBlockOverlay(appLabel, foregroundPackage, isStrictMode)
+                // Tier 1: Steady Full-Screen WindowManager Overlay.
+                if (!overlayManager.isShowing || overlayManager.currentPackage != foregroundPackage) {
+                  lastAlertTimeMillis = now
+                  lastAlertedPackage = foregroundPackage
+                  _lastDetectedPackage.value = foregroundPackage
 
-                // Launch BlockScreenActivity for platforms permitting background activity starts
-                val blockIntent = Intent(applicationContext, BlockScreenActivity::class.java).apply {
-                  flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                  putExtra(BlockScreenActivity.EXTRA_BLOCKED_APP_NAME, appLabel)
-                  putExtra(BlockScreenActivity.EXTRA_BLOCKED_PACKAGE_NAME, foregroundPackage)
-                  putExtra(BlockScreenActivity.EXTRA_IS_STRICT, isStrictMode)
+                  val timestampStr = timeFormat.format(Date(now))
+                  Log.i(TAG, "Restricted app intercepted: $appLabel ($foregroundPackage) [strict=$isStrictMode]")
+                  overlayManager.showBlockOverlay(appLabel, foregroundPackage, isStrictMode, lockReasonBadge)
+                  _lastDetectedEvent.value = "Blocked $appLabel at $timestampStr"
                 }
-                try {
-                  startActivity(blockIntent)
-                } catch (_: Exception) {
-                }
-
-                _lastDetectedEvent.value = "Blocked $appLabel at $timestampStr (Active Interception)"
               } else {
-                // Tier 2: Overlay permission not granted - attempt activity launch, navigate home and send high-priority alert
-                val blockIntent = Intent(applicationContext, BlockScreenActivity::class.java).apply {
-                  flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                  putExtra(BlockScreenActivity.EXTRA_BLOCKED_APP_NAME, appLabel)
-                  putExtra(BlockScreenActivity.EXTRA_BLOCKED_PACKAGE_NAME, foregroundPackage)
-                  putExtra(BlockScreenActivity.EXTRA_IS_STRICT, isStrictMode)
-                }
-                var activityStarted = false
-                try {
-                  startActivity(blockIntent)
-                  activityStarted = true
-                } catch (_: Exception) {
-                }
+                // Tier 2: Overlay permission not granted - launch BlockScreenActivity with cooldown
+                val timeSinceLast = now - lastAlertTimeMillis
+                if (timeSinceLast > INTERVENTION_COOLDOWN_MS || lastAlertedPackage != foregroundPackage) {
+                  lastAlertTimeMillis = now
+                  lastAlertedPackage = foregroundPackage
+                  _lastDetectedPackage.value = foregroundPackage
 
-                if (!activityStarted) {
-                  overlayManager.goToHomeScreen()
+                  val timestampStr = timeFormat.format(Date(now))
+                  val blockIntent = Intent(applicationContext, BlockScreenActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra(BlockScreenActivity.EXTRA_BLOCKED_APP_NAME, appLabel)
+                    putExtra(BlockScreenActivity.EXTRA_BLOCKED_PACKAGE_NAME, foregroundPackage)
+                    putExtra(BlockScreenActivity.EXTRA_IS_STRICT, isStrictMode)
+                    if (lockReasonBadge != null) {
+                      putExtra(BlockScreenActivity.EXTRA_LOCK_REASON_BADGE, lockReasonBadge)
+                    }
+                  }
+                  var activityStarted = false
+                  try {
+                    startActivity(blockIntent)
+                    activityStarted = true
+                  } catch (_: Exception) {
+                  }
+
+                  if (!activityStarted) {
+                    overlayManager.goToHomeScreen()
+                  }
+                  notificationHelper.sendFocusShieldAlertNotification(appLabel)
+                  _lastDetectedEvent.value = "Alerted for $appLabel at $timestampStr"
                 }
-                notificationHelper.sendFocusShieldAlertNotification(appLabel)
-                _lastDetectedEvent.value = "Alerted for $appLabel at $timestampStr (Interception active)"
+              }
+            } else {
+              if (overlayManager.isShowing) {
+                overlayManager.hideBlockOverlay()
+                lastAlertedPackage = ""
               }
             }
-          } else {
-            // Foreground package is not in the blocked set (e.g. user returned to home or focus app)
-            if (overlayManager.isShowing && foregroundPackage != null && !blockedPackageSet.contains(foregroundPackage)) {
+          } else if (foregroundPackage == packageName) {
+            if (overlayManager.isShowing) {
               overlayManager.hideBlockOverlay()
               lastAlertedPackage = ""
             }
@@ -344,6 +417,7 @@ class FocusShieldService : Service() {
     monitorJob?.cancel()
     monitorJob = null
     lastAlertedPackage = ""
+    lastKnownForegroundPackage = null
     overlayManager.hideBlockOverlay()
   }
 

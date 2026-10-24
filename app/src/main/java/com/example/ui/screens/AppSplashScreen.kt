@@ -310,6 +310,16 @@ fun AppSplashScreen(
             color = Color(0xFFA5B4FC),
             textAlign = TextAlign.Center
           )
+
+          Text(
+            text = "Founded & Crafted by Amit Meena",
+            style = MaterialTheme.typography.labelSmall.copy(
+              fontWeight = FontWeight.SemiBold,
+              letterSpacing = 0.8.sp
+            ),
+            color = SplashElectricCyan.copy(alpha = 0.85f),
+            textAlign = TextAlign.Center
+          )
         }
       }
 

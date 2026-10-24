@@ -251,7 +251,7 @@ fun AnalyticsSection(
             color = MaterialTheme.colorScheme.onSurface
           )
           Text(
-            text = "Completed and cancelled sessions are saved automatically to your local database.",
+            text = "Completed and cancelled focus sessions will appear here automatically.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
           )

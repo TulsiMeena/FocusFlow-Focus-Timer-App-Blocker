@@ -23,6 +23,7 @@ class InstalledAppsViewModel(application: Application) : AndroidViewModel(applic
 
   private val repository = InstalledAppsRepository(application)
   private val sessionRepository: SessionRepository
+  private val smartPrefs = com.example.shield.SmartShieldPreferencesManager.getInstance(application)
 
   init {
     val database = AppDatabase.getInstance(application)
@@ -53,6 +54,18 @@ class InstalledAppsViewModel(application: Application) : AndroidViewModel(applic
 
   val totalAppCount: StateFlow<Int> = _allApps.map { it.size }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+  val appDailyLimits: StateFlow<Map<String, Int>> = smartPrefs.appDailyLimits
+
+  val totalScreenTimeTodayMinutes: StateFlow<Int> = _allApps.map { apps ->
+    (apps.sumOf { it.usageDurationMillis } / 60_000L).toInt()
+  }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+  val topUsedAppsToday: StateFlow<List<AppInfo>> = _allApps.map { apps ->
+    apps.filter { it.usageDurationMillis >= 60_000L }
+      .sortedByDescending { it.usageDurationMillis }
+      .take(4)
+  }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
   private val _selectedCategory = MutableStateFlow(com.example.apps.model.AppCategory.ALL)
   val selectedCategory: StateFlow<com.example.apps.model.AppCategory> = _selectedCategory.asStateFlow()
@@ -149,6 +162,19 @@ class InstalledAppsViewModel(application: Application) : AndroidViewModel(applic
     viewModelScope.launch {
       val isBlocked = blockedPackageNames.value.contains(packageName)
       sessionRepository.setAppBlocked(packageName, appName, !isBlocked)
+    }
+  }
+
+  fun setAppDailyLimit(packageName: String, appName: String, limitMinutes: Int) {
+    smartPrefs.setAppDailyLimitMinutes(packageName, limitMinutes)
+    if (limitMinutes > 0 && isMasterShieldEnabled.value) {
+      val labels = _allApps.value.associate { it.packageName to it.appName } + (packageName to appName)
+      com.example.shield.FocusShieldService.start(
+        context = getApplication(),
+        blockedPackages = blockedPackageNames.value.toList(),
+        labelsMap = labels,
+        isStrict = false
+      )
     }
   }
 

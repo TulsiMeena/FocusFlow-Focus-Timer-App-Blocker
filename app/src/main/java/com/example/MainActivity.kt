@@ -108,11 +108,19 @@ fun MainAppContent(targetRoute: String? = null) {
   val installedAppsViewModel: InstalledAppsViewModel = viewModel()
   val settingsViewModel: SettingsViewModel = viewModel()
   val statisticsViewModel: StatisticsViewModel = viewModel()
+  val notificationHelper = remember(context) { com.example.timer.NotificationHelper(context) }
+
+  var showFounderWelcomeDialog by rememberSaveable {
+    mutableStateOf(notificationHelper.shouldShowFounderWelcomeDialog())
+  }
 
   val notifLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.RequestPermission(),
-    onResult = {
+    onResult = { isGranted ->
       focusViewModel.checkPermissions()
+      if (isGranted) {
+        notificationHelper.sendFounderWelcomeNotificationIfFirstLaunch()
+      }
     }
   )
 
@@ -125,8 +133,22 @@ fun MainAppContent(targetRoute: String? = null) {
         ) != PackageManager.PERMISSION_GRANTED
       ) {
         notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+      } else {
+        notificationHelper.sendFounderWelcomeNotificationIfFirstLaunch()
       }
+    } else {
+      notificationHelper.sendFounderWelcomeNotificationIfFirstLaunch()
     }
+  }
+
+  if (showFounderWelcomeDialog) {
+    com.example.ui.components.FounderWelcomeDialog(
+      onDismiss = {
+        notificationHelper.markFounderWelcomeDialogShown()
+        notificationHelper.sendFounderWelcomeNotificationIfFirstLaunch()
+        showFounderWelcomeDialog = false
+      }
+    )
   }
 
   LaunchedEffect(targetRoute) {

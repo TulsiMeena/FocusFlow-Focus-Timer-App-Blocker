@@ -1293,6 +1293,70 @@ fun SettingsScreen(
       }
     }
 
+    // SECTION 6: ABOUT FOUNDER & DEVELOPER
+    Card(
+      modifier = Modifier
+        .fillMaxWidth()
+        .testTag("about_founder_card"),
+      shape = RoundedCornerShape(16.dp),
+      colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+      border = BorderStroke(1.dp, RadiantViolet.copy(alpha = 0.4f))
+    ) {
+      Column(
+        modifier = Modifier
+          .fillMaxWidth()
+          .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+      ) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+          ) {
+            Icon(
+              imageVector = Icons.Default.Shield,
+              contentDescription = null,
+              tint = RadiantViolet
+            )
+            Column {
+              Text(
+                text = "Created by Amit Meena",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+              )
+              Text(
+                text = "Founder & Lead Developer • Focus Shield Pro",
+                style = MaterialTheme.typography.labelSmall,
+                color = RadiantViolet,
+                fontWeight = FontWeight.SemiBold
+              )
+            }
+          }
+
+          OutlinedButton(
+            onClick = {
+              com.example.timer.NotificationHelper(context).sendFounderWelcomeNotificationNow()
+            },
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.testTag("btn_send_founder_welcome")
+          ) {
+            Text("Welcome Note", style = MaterialTheme.typography.labelSmall)
+          }
+        }
+
+        Text(
+          text = "Engineered for deep work, zero distractions, and complete on-device privacy.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+      }
+    }
+
     // Return to Home
     Button(
       onClick = onNavigateHome,
